@@ -4,6 +4,7 @@ from rng import get_rng, rng_context, register_rng
 from mpiwrapper import mpi
 from moe import SimpleMoE, MoE_EP, MoE_TP
 import time
+import tracemalloc
 
 # Example usage
 def run_moe(
@@ -67,14 +68,34 @@ def run_moe(
         outputs = moe(X)
     end_time = time.time()
     avg_duration_ms = 1000 * (end_time - start_time) / N
+    throughput = batch_size / avg_duration_ms
+
+    # Measure memory
+    tracemalloc.start()
+    N = 3
+    mem = 0
+    for _ in range(N):
+        outputs = moe(X)
+        current, peak = tracemalloc.get_traced_memory()
+        mem += current
+
+    tracemalloc.stop()
+    avg_memory = mem / N
+    avg_memory = avg_memory / 1024 ** 2
     
     # Print timing information
-    if mpi.get_rank() == 0:
-        print(f"Forward pass time for {moe_type} MoE: {avg_duration_ms} ms")
+    # if mpi.get_rank() == 0:
+    #     print(f"Forward pass time for {moe_type} MoE: {avg_duration_ms} ms")
+
+    # # Print memory information
+    # if mpi.get_rank() == 0:
+    #     print(f"Memory for {moe_type} MoE: {avg_memory / (1024):.2f} KB")
 
     return dict(
         outputs=outputs,
-        avg_duration_ms=avg_duration_ms
+        avg_duration_ms=avg_duration_ms,
+        avg_memory=avg_memory,
+        throughput=throughput
     )
     
     
@@ -82,15 +103,20 @@ def benchmark_moe():
     # Test simple MoE
     simple_result = run_moe(moe_type="simple")
     print(f"Simple MoE: {simple_result['avg_duration_ms']} ms")
+    print(f"Simple MoE: {simple_result['avg_memory']} mb")
+    print(f"Simple MoE: {simple_result['throughput']} samples / ms")
 
     # Test TP MoE
     tp_result = run_moe(moe_type="tp")
     print(f"TP MoE: {tp_result['avg_duration_ms']} ms")
+    print(f"TP MoE: {tp_result['avg_memory']} mb")
+    print(f"TP MoE: {tp_result['throughput']} samples / ms")
 
     # Test EP MoE
     ep_result = run_moe(moe_type="ep")
     print(f"EP MoE: {ep_result['avg_duration_ms']} ms")
-
+    print(f"EP MoE: {ep_result['avg_memory']} mb")
+    print(f"EP MoE: {ep_result['throughput']} samples / ms")
 
 if __name__ == "__main__":
     benchmark_moe()
