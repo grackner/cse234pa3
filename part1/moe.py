@@ -179,10 +179,10 @@ class MoE_TP:
             # For each position in the expert
             for k in range(self.topk):
                 # Get inputs + gates for this expert
-                k_inputs = (indices[:,k] == expert)
-                expert_inputs = x[k_inputs]
+                expert_idx = (indices[:,k] == expert)
+                expert_inputs = x[expert_idx]
                 # Get gates
-                expert_gates = gates[k_inputs, k]
+                expert_gates = gates[expert_idx, k]
 
                 # Process outputs in expert
                 expert_process = self.experts[expert]
@@ -190,7 +190,7 @@ class MoE_TP:
                 # Call expert with inputs
                 expert_outputs = expert_process(expert_inputs)
                 # Add to outputs with expert outputs
-                outputs[k_inputs] += expert_outputs * expert_gates
+                outputs[expert_idx] += expert_outputs * expert_gates
 
         # All reduce
         mpi.allreduce(outputs)
@@ -249,6 +249,7 @@ class SimpleMoE:
         outputs = np.zeros((batch_size, self.output_dim))
 
         # Compute weighted combination of expert outputs
+        # Since 
         for k in range(self.topk):
             for i in range(batch_size):
                 expert_idx = indices[i, k]
@@ -303,20 +304,71 @@ class MoE_EP:
             Output tensor of shape (batch_size, output_dim)
         """
         batch_size = x.shape[0]
+        # Get expert index
+        expert_idx = self.rank
 
         # Initialize output tensor
         outputs = np.zeros((batch_size, self.output_dim))
 
-        # TODO: Implement the forward pass.
-        # 1. Compute the routing indices and gates for each input
+        # Implement the forward pass.
+        # 1. Compute the routing indices and gates for each input and an input buffer
         indices, gates = self.router(x, self.topk)
+        input_buffer = np.zeros((self.num_experts, batch_size, self.topk), dtype=bool)
 
         # 2. Process local inputs with this expert (within the device)
+        # Since process holds one expert loop through batch size then k position
+        for expert in range(self.num_experts):
+            for k in range(self.topk):
+                # Add inputs related to expert
+                input_buffer[expert, :, k] = (indices[:, k] == expert)
+
+        # Calculate number of inputs this expert will receive
+        recv_inputs = np.sum(input_buffer, axis=(1, 2))
+        # This expert's input mask
+        local_buffer = input_buffer[expert_idx]
+        # Combined buffer
+        combined_buffer = np.any(local_buffer, axis=1)
+        # Get local inputs based on combined buffer
+        local_inputs = x[combined_buffer]
+        # Get original indexes
+        original_indices = np.where(combined_buffer)[0]
+
+        # Create a tensor to map each selected token to its gate value
+        flat_selection = local_buffer.reshape(-1)
+        flat_gates = gates.reshape(-1)
+        # Then extract gates for the selected tokens
+        local_gates = np.zeros(len(original_indices))
+        local_k_positions = np.zeros(len(original_indices), dtype=int)
+    
+        pos = 0
+        for i in range(batch_size):
+            for k in range(self.topk):
+                if local_buffer[i, k]:
+                    local_gates[pos] = gates[i, k]
+                    local_k_positions[pos] = k
+                    pos += 1
+        
+        # Calculate the outputs using the inputs
+        if len(local_inputs) > 0:
+            local_outputs = self.expert(local_inputs)
+            local_outputs = local_outputs * local_gates.reshape(-1, 1)
+        else:
+            local_outputs = np.zeros((0, self.output_dim))
 
         # 3. Communicate between devices to get the outputs from all experts
+        all_token_counts = mpi.allgather(recv_inputs[expert_idx])
+        all_original_indices = mpi.allgather(original_indices)
+        all_expert_outputs = mpi.allgather(local_outputs)
+
+        output_idx = 0
+        for process_rank in range(self.num_experts):
+            process_indices = all_original_indices[process_rank]
+            process_outputs = all_expert_outputs[process_rank]
+            
+            for i, orig_idx in enumerate(process_indices):
+                outputs[orig_idx] += process_outputs[i]
 
         # 4. Return the outputs
-
         return outputs
 
     def __call__(self, x):
