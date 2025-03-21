@@ -181,69 +181,117 @@ def get_optimal_N_D_from_cost(cost_budget):
     # # Calculate the total FLOPs we can get from our budget
     # total_flops = gpus[best_gpu]['flops']
     # training_budget_flops = cost_budget * total_flops
-    gpus = {
-        'A100': {'cost_per_hour': 4.0, 'peak_flops': 312e12, 'mfu': 0.4},
-        'V100': {'cost_per_hour': 2.5, 'peak_flops': 125e12, 'mfu': 0.4},
-        'T4': {'cost_per_hour': 1.0, 'peak_flops': 65e12, 'mfu': 0.4}
-    }
-    best_gpu = None
-    max_flops_per_dollar = 0
+    # gpus = {
+    #     'A100': {'cost_per_hour': 4.0, 'peak_flops': 312e12, 'mfu': 0.4},
+    #     'V100': {'cost_per_hour': 2.5, 'peak_flops': 125e12, 'mfu': 0.4},
+    #     'T4': {'cost_per_hour': 1.0, 'peak_flops': 65e12, 'mfu': 0.4}
+    # }
+    # best_gpu = None
+    # max_flops_per_dollar = 0
     
-    for gpu, specs in gpus.items():
-        effective_flops_per_second = specs['peak_flops'] * specs['mfu']
-        flops_per_dollar = effective_flops_per_second * 3600 / specs['cost_per_hour']
+    # for gpu, specs in gpus.items():
+    #     effective_flops_per_second = specs['peak_flops'] * specs['mfu']
+    #     flops_per_dollar = effective_flops_per_second * 3600 / specs['cost_per_hour']
         
-        if flops_per_dollar > max_flops_per_dollar:
-            max_flops_per_dollar = flops_per_dollar
-            best_gpu = gpu
+    #     if flops_per_dollar > max_flops_per_dollar:
+    #         max_flops_per_dollar = flops_per_dollar
+    #         best_gpu = gpu
     
-    # Calculate total effective FLOPs available for the budget
-    effective_flops_per_second = gpus[best_gpu]['peak_flops'] * gpus[best_gpu]['mfu']
-    total_hours = cost_budget / gpus[best_gpu]['cost_per_hour']
-    total_seconds = total_hours * 3600
-    training_budget_flops = effective_flops_per_second * total_seconds
-    # # Constants for the scaling law
-    # a = 406.4
+    # # Calculate total effective FLOPs available for the budget
+    # effective_flops_per_second = gpus[best_gpu]['peak_flops'] * gpus[best_gpu]['mfu']
+    # total_hours = cost_budget / gpus[best_gpu]['cost_per_hour']
+    # total_seconds = total_hours * 3600
+    # training_budget_flops = effective_flops_per_second * total_seconds
+    # # # Constants for the scaling law
+    # # a = 406.4
+    # # alpha = 0.34
+    # # b = 410.7
+    # # beta = 0.29
+    # # c = 1.69
+    # # exponent = (1+beta)/(1+alpha+beta)
+    # # N = ((a*alpha*(1+alpha+beta))/(b*beta*6**beta))**(1/(alpha+beta)) * training_budget_flops**exponent
+    
+    # # # Calculate D from compute = 6ND
+    # # D = training_budget_flops / (6 * N)
     # alpha = 0.34
-    # b = 410.7
     # beta = 0.29
-    # c = 1.69
-    # exponent = (1+beta)/(1+alpha+beta)
-    # N = ((a*alpha*(1+alpha+beta))/(b*beta*6**beta))**(1/(alpha+beta)) * training_budget_flops**exponent
+    # A = 406.4
+    # B = 410.7
+    # compute = training_budget_flops
+    # flops_per_param_token = 6
     
-    # # Calculate D from compute = 6ND
-    # D = training_budget_flops / (6 * N)
-    alpha = 0.34
-    beta = 0.29
-    A = 406.4
-    B = 410.7
-    compute = training_budget_flops
-    flops_per_param_token = 6
+    # # Initial guess
+    # N = (compute / flops_per_param_token) ** 0.5  # Balanced starting point
     
-    # Initial guess
-    N = (compute / flops_per_param_token) ** 0.5  # Balanced starting point
-    
-    # Iterative refinement
-    for _ in range(10):
-        # Based on the scaling law relationship and compute budget
-        D = compute / (flops_per_param_token * N)
+    # # Iterative refinement
+    # for _ in range(10):
+    #     # Based on the scaling law relationship and compute budget
+    #     D = compute / (flops_per_param_token * N)
         
-        # The optimal ratio from the scaling law
-        optimal_ratio = (A * alpha / (B * beta)) ** (1/(beta+1)) * N**((alpha+1)/(beta+1))
+    #     # The optimal ratio from the scaling law
+    #     optimal_ratio = (A * alpha / (B * beta)) ** (1/(beta+1)) * N**((alpha+1)/(beta+1))
         
-        # Adjust N based on current ratio
-        current_ratio = N / D
-        adjustment = (optimal_ratio / current_ratio) ** 0.5
-        N = N * adjustment
+    #     # Adjust N based on current ratio
+    #     current_ratio = N / D
+    #     adjustment = (optimal_ratio / current_ratio) ** 0.5
+    #     N = N * adjustment
     
-    # Final calculation of D
-    D = compute / (flops_per_param_token * N)
+    # # Final calculation of D
+    # D = compute / (flops_per_param_token * N)
     
-    # Round to nearest integers
-    N = round(N)
-    D = round(D)
+    # # Round to nearest integers
+    # N = round(N)
+    # D = round(D)
+    gpu_costs = {
+        'A100': {'cost_per_hour': 4.0, 'TFLOPs': 312},
+        'V100': {'cost_per_hour': 2.5, 'TFLOPs': 125},
+        'T4': {'cost_per_hour': 1.0, 'TFLOPs': 65}
+    }
+    
+    # Assume MFU (Machine Fill-Up) is 40% for all GPUs
+    mfu = 0.4
+    
+    # Define the scaling law
+    def scaling_law(N, D):
+        return 406.4 / (N ** 0.34) + 410.7 / (D ** 0.29) + 1.69
+    
+    # Initialize optimal values
+    best_gpu = None
+    optimal_N = None
+    optimal_D = None
+    max_training_budget_flops = 0
+    
+    # Iterate over GPUs to find the best one
+    for gpu, specs in gpu_costs.items():
+        # Calculate effective training FLOPs per hour
+        effective_flops_per_hour = specs['TFLOPs'] * mfu
+        
+        # Calculate total hours that can be afforded with the budget
+        hours_affordable = cost_budget / specs['cost_per_hour']
+        
+        # Calculate total effective training FLOPs
+        training_budget_flops = effective_flops_per_hour * hours_affordable
+        
+        # Check if this GPU provides more FLOPs than the current best
+        if training_budget_flops > max_training_budget_flops:
+            max_training_budget_flops = training_budget_flops
+            best_gpu = gpu
+            
+            # Find optimal N and D using the scaling law
+            # This part requires optimization techniques or brute force search
+            # For simplicity, let's assume we are searching over a reasonable range
+            best_cost = float('inf')
+            for N in range(1000000, 100000000, 1000000):  # Example range for N
+                for D in range(1000000, 100000000, 1000000):  # Example range for D
+                    cost = scaling_law(N, D)
+                    if cost < best_cost:
+                        best_cost = cost
+                        optimal_N = N
+                        optimal_D = D
+    
+    return optimal_N, optimal_D, max_training_budget_flops, best_gpu
 
-    return N, D, training_budget_flops, best_gpu
+    # return N, D, training_budget_flops, best_gpu
 
 
 if __name__ == "__main__":
