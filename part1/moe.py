@@ -317,13 +317,11 @@ class MoE_EP:
         input_buffer = np.zeros((self.num_experts, batch_size, self.topk), dtype=bool)
 
         # 2. Process local inputs with this expert (within the device)
-        # Since process holds one expert loop through batch size then k position
+        # Loop through k positions
         # Add relevant inputs into buffer
-        for expert in range(self.num_experts):
-            # Loop through k positions
-            for k in range(self.topk):
-                # Add inputs related to expert
-                input_buffer[expert, :, k] = (indices[:, k] == expert)
+        for k in range(self.topk):
+            # Add inputs equal to the single expert
+            input_buffer[0, :, k] = (indices[:, k] == 0)
 
         # Calculate number of inputs this expert will receive
         recv_inputs = np.sum(input_buffer, axis=(1, 2))
@@ -337,14 +335,12 @@ class MoE_EP:
         # Then extract gates for the selected tokens
         # Create buffers to hold results
         local_gates = np.zeros(recv_inputs)
-        local_k_positions = np.zeros(recv_inputs, dtype=int)
     
         pos = 0
         for i in range(batch_size):
             for k in range(self.topk):
                 if local_buffer[i, k]:
                     local_gates[pos] = gates[i, k]
-                    local_k_positions[pos] = k
                     pos += 1
         
         # Calculate the outputs using the inputs
@@ -355,7 +351,6 @@ class MoE_EP:
             local_outputs = np.zeros((0, self.output_dim))
 
         # 3. Communicate between devices to get the outputs from all experts
-        all_token_counts = mpi.allgather(recv_inputs[expert_idx])
         all_expert_outputs = mpi.allgather(local_outputs)
 
         output_idx = 0
