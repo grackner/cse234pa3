@@ -313,11 +313,14 @@ class MoE_EP:
         # Implement the forward pass.
         # 1. Compute the routing indices and gates for each input and an input buffer
         indices, gates = self.router(x, self.topk)
+        # Create buffer to hold inputs
         input_buffer = np.zeros((self.num_experts, batch_size, self.topk), dtype=bool)
 
         # 2. Process local inputs with this expert (within the device)
         # Since process holds one expert loop through batch size then k position
+        # Add relevant inputs into buffer
         for expert in range(self.num_experts):
+            # Loop through k positions
             for k in range(self.topk):
                 # Add inputs related to expert
                 input_buffer[expert, :, k] = (indices[:, k] == expert)
@@ -326,19 +329,15 @@ class MoE_EP:
         recv_inputs = np.sum(input_buffer, axis=(1, 2))
         # This expert's input mask
         local_buffer = input_buffer[expert_idx]
-        # Combined buffer
-        combined_buffer = np.any(local_buffer, axis=1)
-        # Get local inputs based on combined buffer
-        local_inputs = x[combined_buffer]
-        # Get original indexes
-        original_indices = np.where(combined_buffer)[0]
 
-        # Create a tensor to map each selected token to its gate value
-        flat_selection = local_buffer.reshape(-1)
-        flat_gates = gates.reshape(-1)
+        # Get local given inputs
+        combined_buffer = np.any(local_buffer, axis=1)
+        local_inputs = x[combined_buffer]
+
         # Then extract gates for the selected tokens
-        local_gates = np.zeros(len(original_indices))
-        local_k_positions = np.zeros(len(original_indices), dtype=int)
+        # Create buffers to hold results
+        local_gates = np.zeros(recv_inputs)
+        local_k_positions = np.zeros(recv_inputs, dtype=int)
     
         pos = 0
         for i in range(batch_size):
@@ -357,16 +356,14 @@ class MoE_EP:
 
         # 3. Communicate between devices to get the outputs from all experts
         all_token_counts = mpi.allgather(recv_inputs[expert_idx])
-        all_original_indices = mpi.allgather(original_indices)
         all_expert_outputs = mpi.allgather(local_outputs)
 
         output_idx = 0
         for process_rank in range(self.num_experts):
-            process_indices = all_original_indices[process_rank]
             process_outputs = all_expert_outputs[process_rank]
             
-            for i, orig_idx in enumerate(process_indices):
-                outputs[orig_idx] += process_outputs[i]
+            for i in range(0, recv_inputs[0]):
+                outputs[i] += process_outputs[i]
 
         # 4. Return the outputs
         return outputs
