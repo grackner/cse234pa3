@@ -55,97 +55,64 @@ def model_training_cost_analysis_deepseek(model_config_path):
     #TODO you code here.
     with open(model_config_path, 'r') as f:
         config = json.load(f)
-    
+        
     vocab_size = config['vocab_size']
     hidden_size = config['hidden_size']
     max_position_embeddings = config['max_position_embeddings']
     num_hidden_layers = config['num_hidden_layers']
     intermediate_size = config['intermediate_size']
-    moe_intermediate_size = config.get('moe_intermediate_size', 2048)
-    n_routed_experts = config.get('n_routed_experts', 256)
-    n_shared_experts = config.get('n_shared_experts', 1)
-    num_experts_per_tok = config.get('num_experts_per_tok', 8)
-    moe_layer_freq = config.get('moe_layer_freq', 1)
     num_attention_heads = config['num_attention_heads']
+    max_sequence_length = max_position_embeddings  # Use max_position_embeddings for sequence length
+    n_routed_experts = config['n_routed_experts']
+    n_shared_experts = config['n_shared_experts']
+    num_experts_per_tok = config['num_experts_per_tok']
+    moe_intermediate_size = config['moe_intermediate_size']
+    moe_layer_freq = config['moe_layer_freq']  # MoE layer frequency
     
-    # Calculate parameters
-    # Word embedding
+    # Calculate total parameters
     word_embedding_params = vocab_size * hidden_size
+    positional_embedding_params = max_position_embeddings * hidden_size
     
-    # Positional embedding is typically not used in newer models with RoPE, but included for consistency
-    positional_embedding_params = 0
-    
-    # Count number of dense and MoE layers
-    num_moe_layers = num_hidden_layers // moe_layer_freq
-    num_dense_layers = num_hidden_layers - num_moe_layers
-    
-    # Standard attention parameters
     attention_params = 4 * hidden_size * hidden_size
+    mlp_params = 2 * hidden_size * intermediate_size
+    layer_norm_params = 2 * hidden_size
     
-    # Dense MLP parameters
-    dense_mlp_params = 2 * hidden_size * intermediate_size
+    # MoE-specific parameters
+    expert_mlp_params = 2 * hidden_size * moe_intermediate_size
+    total_expert_params = n_routed_experts * expert_mlp_params
+    shared_expert_params = n_shared_experts * expert_mlp_params  # Assuming similar structure
     
-    # MoE parameters
-    # Router parameters
-    router_params = hidden_size * n_routed_experts
+    # Total parameters per layer
+    params_per_layer = attention_params + mlp_params + layer_norm_params
+    params_per_moe_layer = params_per_layer + total_expert_params + shared_expert_params
     
-    # Expert parameters (both routed and shared)
-    expert_params = (n_routed_experts + n_shared_experts) * (2 * hidden_size * moe_intermediate_size)
+    # Adjust for MoE layer frequency
+    num_moe_layers = num_hidden_layers * moe_layer_freq
     
-    # Layer norm parameters
-    layer_norm_params = 2 * 2 * hidden_size
+    # Total parameters for all layers
+    transformer_params = num_hidden_layers * params_per_layer + num_moe_layers * total_expert_params
+    total_params = word_embedding_params + positional_embedding_params + transformer_params
     
-    # Parameters per layer type
-    dense_layer_params = attention_params + dense_mlp_params + layer_norm_params
-    moe_layer_params = attention_params + router_params + expert_params + layer_norm_params
+    # Calculate TFLOPs for a single forward pass of one layer
+    N = max_sequence_length
+    D = hidden_size
+    H = num_attention_heads
     
-    # Total parameters
-    total_params = (
-        word_embedding_params +
-        positional_embedding_params +
-        (num_dense_layers * dense_layer_params) +
-        (num_moe_layers * moe_layer_params)
-    )
+    qkv_proj_flops = 3 * N * D * D
+    attn_flops = N * N * D
+    out_proj_flops = N * D * D
+    attention_flops = qkv_proj_flops + attn_flops + out_proj_flops
     
-    # FLOPs calculation for one layer
-    seq_len = 4096  # Standard context length for computation
-    
-    # Attention FLOPs
-    attention_flops = 4 * seq_len * hidden_size * hidden_size + seq_len * seq_len * hidden_size
-    
-    # MLP FLOPs - for MoE layers, only activated experts contribute
-    # For a single token, we activate num_experts_per_tok experts out of n_routed_experts
-    active_expert_ratio = num_experts_per_tok / n_routed_experts
-    
-    # MoE layer FLOPs (per token, we only use a subset of experts)
-    moe_mlp_flops = 2 * seq_len * hidden_size * moe_intermediate_size * num_experts_per_tok
-    
-    # Dense layer FLOPs
-    dense_mlp_flops = 2 * seq_len * hidden_size * intermediate_size
-    
-    # Average FLOPs per layer considering the mix of dense and MoE layers
-    avg_mlp_flops = (num_dense_layers * dense_mlp_flops + num_moe_layers * moe_mlp_flops) / num_hidden_layers
-    
-    # Total FLOPs per layer
-    flops_per_layer = attention_flops + avg_mlp_flops
-    
-    # Convert to TFLOPs
+    moe_mlp_flops = num_experts_per_tok * N * (2 * D * moe_intermediate_size)
+    flops_per_layer = attention_flops + moe_mlp_flops
     flops_layer_TF = flops_per_layer / 1e12
     
-    # Peak memory cost
-    # KV cache
-    kv_cache = 2 * seq_len * hidden_size * 2  # 2 bytes per fp16 value
+    # Calculate peak memory cost for a single forward pass of one layer
+    kv_cache = 2 * N * D * 2  # 2 bytes per bfloat16 value
+    attn_matrix = N * N * 2  # 2 bytes per bfloat16 value
+    moe_activations = num_experts_per_tok * N * D * 2  # 2 bytes per bfloat16 value
+    peak_memory_GB = (kv_cache + attn_matrix + moe_activations) / 1e9
     
-    # Attention matrix
-    attn_matrix = seq_len * seq_len * 2  # 2 bytes per fp16 value
-    
-    # Activations
-    activations = seq_len * hidden_size * 2  # 2 bytes per fp16 value
-    
-    # Total peak memory in GB
-    peak_memory_GB = (kv_cache + attn_matrix + activations) / 1e9
-    
-
     return total_params, flops_layer_TF, peak_memory_GB
 
 def get_optimal_N_D_from_cost(cost_budget):
