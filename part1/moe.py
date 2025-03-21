@@ -277,7 +277,6 @@ class MoE_EP:
         output_dim (int): Output dimension
         topk (int): Number of experts to route each input to
     """
-
     def __init__(self, input_dim, hidden_dim, output_dim, num_experts, topk=1):
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -307,9 +306,6 @@ class MoE_EP:
         # Get expert index
         expert_idx = self.rank
 
-        # Initialize output tensor
-        outputs = np.zeros((batch_size, self.output_dim))
-
         # Implement the forward pass.
         # 1. Compute the routing indices and gates for each input and an input buffer
         indices, gates = self.router(x, self.topk)
@@ -317,11 +313,8 @@ class MoE_EP:
         input_buffer = np.zeros((self.num_experts, batch_size, self.topk), dtype=bool)
 
         # 2. Process local inputs with this expert (within the device)
-        # Loop through k positions
         # Add relevant inputs into buffer
-        for k in range(self.topk):
-            # Add inputs equal to the single expert
-            input_buffer[0, :, k] = (indices[:, k] == 0)
+        input_buffer[0, :, :] = (indices == 0)
 
         # Calculate number of inputs this expert will receive
         recv_inputs = np.sum(input_buffer, axis=(1, 2))
@@ -336,29 +329,20 @@ class MoE_EP:
         # Create buffers to hold results
         local_gates = np.zeros(recv_inputs)
     
-        pos = 0
-        for i in range(batch_size):
-            for k in range(self.topk):
-                if local_buffer[i, k]:
-                    local_gates[pos] = gates[i, k]
-                    pos += 1
+        true_indices = np.where(local_buffer)
+        local_gates[:len(true_indices[0])] = gates[true_indices]
         
         # Calculate the outputs using the inputs
-        if len(local_inputs) > 0:
-            local_outputs = self.expert(local_inputs)
-            local_outputs = local_outputs * local_gates.reshape(-1, 1)
-        else:
-            local_outputs = np.zeros((0, self.output_dim))
+        local_outputs = self.expert(local_inputs)
+        local_outputs = local_outputs * local_gates.reshape(-1, 1)
 
         # 3. Communicate between devices to get the outputs from all experts
         all_expert_outputs = mpi.allgather(local_outputs)
 
-        output_idx = 0
-        for process_rank in range(self.num_experts):
-            process_outputs = all_expert_outputs[process_rank]
-            
-            for i in range(0, recv_inputs[0]):
-                outputs[i] += process_outputs[i]
+        process_outputs = all_expert_outputs[0]  
+        # Create outputs buffer  
+        outputs = np.zeros((batch_size, self.output_dim))
+        outputs[:recv_inputs[0]] += process_outputs[:recv_inputs[0]]
 
         # 4. Return the outputs
         return outputs
