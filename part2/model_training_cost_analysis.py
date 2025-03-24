@@ -1,9 +1,6 @@
 import argparse
 import json
 import math
-import argparse
-import json
-import math
 import numpy as np
 from scipy.optimize import minimize
 
@@ -18,18 +15,20 @@ def model_training_cost_analysis_llama(model_config_path):
     intermediate_size = config['intermediate_size']
     num_attention_heads = config['num_attention_heads']
     max_sequence_length = config['max_sequence_length']
-    word_embedding = vocab_size * hidden_size
 
+    word_embedding = vocab_size * hidden_size
     positional_embedding = max_position_embeddings * hidden_size
     attention_params = 4 * hidden_size * hidden_size 
-    attention_biases = 4 * hidden_size 
-    mlp = 2 * hidden_size * intermediate_size 
-    mlp_biases = 2 * intermediate_size 
-    layer_norm = 2 * hidden_size  
+    mlp = 2 * hidden_size * intermediate_size + intermediate_size * hidden_size
+    attention_biases = 0
+    mlp_biases = 0
+    layer_norm = 2 * hidden_size
+    
     params_per_layer = attention_params + attention_biases + mlp + mlp_biases + layer_norm
     transformer = num_hidden_layers * params_per_layer
-    final_layer_norm = 2 * hidden_size
+    final_layer_norm = hidden_size
     lm_head = hidden_size * vocab_size
+    
     total_params = word_embedding + positional_embedding + transformer + final_layer_norm + lm_head
     N = max_sequence_length
     D = hidden_size
@@ -58,7 +57,7 @@ def model_training_cost_analysis_llama(model_config_path):
 
 
 def model_training_cost_analysis_deepseek(model_config_path):
-    """Calculate parameters, FLOPS, and memory for DeepSeek model."""
+    """Calculate parameters, FLOPS, and memory for a single layer of the DeepSeek model."""
     with open(model_config_path, 'r') as f:
         config = json.load(f)
     vocab_size = config['vocab_size']
@@ -75,7 +74,6 @@ def model_training_cost_analysis_deepseek(model_config_path):
     moe_intermediate_size = config.get('moe_intermediate_size', 0)
     moe_layer_freq = config.get('moe_layer_freq', 0)  
     
-
     num_moe_layers = num_hidden_layers // moe_layer_freq if moe_layer_freq > 0 else 0
     num_dense_layers = num_hidden_layers - num_moe_layers
     word_embedding = vocab_size * hidden_size
@@ -83,28 +81,24 @@ def model_training_cost_analysis_deepseek(model_config_path):
     k = hidden_size * hidden_size * (num_key_value_heads / num_attention_heads)
     v = hidden_size * hidden_size * (num_key_value_heads / num_attention_heads)
     o = hidden_size * hidden_size
-    attention = q + k+ v + o
+    attention = q + k + v + o
     mlpd = hidden_size * intermediate_size + intermediate_size * hidden_size
     expert = hidden_size * n_routed_experts
     expert_mlp = hidden_size * moe_intermediate_size + moe_intermediate_size * hidden_size
-    total_expert= n_routed_experts * expert_mlp + expert
+    total_expert = n_routed_experts * expert_mlp + expert
 
     norm_params = 2 * hidden_size  
     
-
-    dense_layer = attention+ mlpd + norm_params
+    dense_layer = attention + mlpd + norm_params
     moe_layer = attention + total_expert + norm_params
     
-
-    transformer= (dense_layer * num_dense_layers) + (moe_layer * num_moe_layers)
+    transformer = (dense_layer * num_dense_layers) + (moe_layer * num_moe_layers)
     
     final_norm = hidden_size
-    lm_head= hidden_size * vocab_size
+    lm_head = hidden_size * vocab_size
     
-
-    total_params = word_embedding + transformer + final_norm+ lm_head
+    total_params = word_embedding + transformer + final_norm + lm_head
     
-
     N = max_sequence_length
     H = num_attention_heads
     H_kv = num_key_value_heads
@@ -113,7 +107,6 @@ def model_training_cost_analysis_deepseek(model_config_path):
    
     layer_norm_flops = 2 * N * D
     
-  
     qflops = N * D * D
     kflops = N * D * D * (H_kv / H)
     vflops = N * D * D * (H_kv / H)
@@ -122,25 +115,31 @@ def model_training_cost_analysis_deepseek(model_config_path):
     attn_compute_flops = 2 * N * N * H * head_dim
     out_proj_flops = N * D * D
     attention_flops = qkvflops + attn_compute_flops + out_proj_flops
-    dense_mlp_flops = 2 * N * D * intermediate_size + N * intermediate_size  
+    dense_mlp_flops = 2 * N * D * intermediate_size
 
     expert_gate_flops = N * n_routed_experts
-    expert_compute_flops = N * num_experts_per_tok * (2 * D * moe_intermediate_size + moe_intermediate_size)
+    expert_compute_flops = N * num_experts_per_tok * (2 * D * moe_intermediate_size)
     moe_mlp_flops = expert_gate_flops + expert_compute_flops
     dense_layer_flops = layer_norm_flops + attention_flops + dense_mlp_flops
     moe_layer_flops = layer_norm_flops + attention_flops + moe_mlp_flops
-    total_flops = (dense_layer_flops * num_dense_layers) + (moe_layer_flops * num_moe_layers)
+    flops_per_layer = moe_layer_flops if num_moe_layers > 0 else dense_layer_flops
+    flops_layer_TF = flops_per_layer / 1e12
 
-    total_tflops = total_flops / 1e12
-    kv_cache_bytes = 2 * N * H_kv * head_dim * 2
-    attn_matrix_bytes = N * N * H * 2
-    dense_mlp_bytes = N * intermediate_size * 2
-    moe_mlp_bytes = N * num_experts_per_tok * moe_intermediate_size * 2
-    other_activations_bytes = N * D * 2
-    activation_memory_bytes = kv_cache_bytes + attn_matrix_bytes + max(dense_mlp_bytes, moe_mlp_bytes) + other_activations_bytes
-    peak_memory_GB = activation_memory_bytes / 1e9
+    batch_size = 1 
+    bytes_per_param = 2 
+    activation_memory = batch_size * N * D * bytes_per_param
+    qkv_memory = 3 * batch_size * N * D * bytes_per_param
+    context_memory = batch_size * N * D * bytes_per_param
+    mlp_intermediate_memory = batch_size * N * intermediate_size * bytes_per_param
+    peak_memory = max(
+        activation_memory + qkv_memory,
+        activation_memory + context_memory,
+        activation_memory + mlp_intermediate_memory
+    )
+    peak_memory_GB = peak_memory / (1024**3)
     
-    return total_params, total_tflops, peak_memory_GB
+    return total_params, flops_layer_TF, peak_memory_GB
+
 
 def get_optimal_N_D_from_cost(cost_budget):
     """
@@ -174,16 +173,13 @@ def get_optimal_N_D_from_cost(cost_budget):
             max_flops_per_dollar = flops_per_dollar
             best_gpu = gpu
     
-
     total_hours = cost_budget / gpus[best_gpu]['cost_per_hour']
     total_flops = total_hours * gpus[best_gpu]['TFLOPs'] * 1e12 * mfu
     
-
     def loss(N, D):
         """Chinchilla scaling law."""
         return 406.4 * (N ** -0.34) + 410.7 * (D ** -0.29) + 1.69
     
-
     def objective(params):
         """Return loss given parameters [log(N), log(D)]."""
         log_N, log_D = params
@@ -196,17 +192,14 @@ def get_optimal_N_D_from_cost(cost_budget):
         log_N, log_D = params
         return np.exp(log_N + log_D) - total_flops
     
-
     initial_guess = [np.log(np.sqrt(total_flops)), np.log(np.sqrt(total_flops))]
     
-
     constraints = {'type': 'eq', 'fun': constraint}
     bounds = [(None, None), (None, None)]  
     
     result = minimize(objective, initial_guess, method='SLSQP', 
                      constraints=constraints, bounds=bounds)
     
-
     log_N, log_D = result.x
     N = int(np.exp(log_N))
     D = int(np.exp(log_D))
