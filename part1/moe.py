@@ -190,7 +190,7 @@ class MoE_TP:
                 # Call expert with inputs
                 expert_outputs = expert_process(expert_inputs)
                 # Add to outputs with expert outputs
-                outputs[expert_idx] += expert_outputs * expert_gates
+                outputs[expert_idx] += expert_outputs * expert_gates.reshape(-1,1)
 
         # All reduce
         mpi.allreduce(outputs)
